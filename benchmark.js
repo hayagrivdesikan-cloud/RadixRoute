@@ -1,4 +1,4 @@
-const http = require('http');
+import http from 'http';
 
 // Helper to make automated HTTP POST requests to your Fastify server
 function sendRequest(payload) {

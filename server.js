@@ -6,7 +6,7 @@ import ClusterEngine from './clusterEngine.js';
 const fastify = Fastify({ logger: true });
 // ... rest of your server code remains exactly the same
 
-const fastify = Fastify({ logger: true });
+
 
 // Initialize Tiers
 const exactTier = new PrefixTrie();
