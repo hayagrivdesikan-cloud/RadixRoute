@@ -1,0 +1,11 @@
+{
+  "name": "ai-cdn",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "fastify": "^4.26.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
