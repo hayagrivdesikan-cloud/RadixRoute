@@ -40,4 +40,4 @@ class VectorCache {
     }
 }
 
-module.exports = VectorCache;
+export default VectorCache;

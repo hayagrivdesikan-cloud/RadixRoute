@@ -1,7 +1,10 @@
-const Fastify = require('fastify');
-const PrefixTrie = require('./prefixTrie');
-const VectorCache = require('./vectorCache');
-const ClusterEngine = require('./clusterEngine');
+import Fastify from 'fastify';
+import PrefixTrie from './prefixTrie.js';
+import VectorCache from './vectorCache.js';
+import ClusterEngine from './clusterEngine.js';
+
+const fastify = Fastify({ logger: true });
+// ... rest of your server code remains exactly the same
 
 const fastify = Fastify({ logger: true });
 

@@ -20,4 +20,4 @@ class ClusterEngine {
     }
 }
 
-module.exports = ClusterEngine;
+export default ClusterEngine;
