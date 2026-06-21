@@ -1,12 +1,17 @@
 {
-  "name": "ai-cdn",
-  "version": "1.0.0",
+  "name": "ai-cdn-upgraded",
+  "version": "0.2.0",
   "type": "module",
-  "dependencies": {
-    "@google/genai": "^2.9.0",
-    "fastify": "^5.8.5"
-  },
+  "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check aiCdnNode.js && node --check cachePolicy.js && node --check classifier.js && node --check clusterEngine.js && node --check embeddingProvider.js && node --check prefixTrie.js && node --check vectorCache.js"
+  },
+  "dependencies": {
+    "fastify": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

@@ -1,49 +1,189 @@
+import crypto from 'crypto';
 import LFUPolicy from './cachePolicy.js';
+import { cosineSimilarity } from './embeddingProvider.js';
+import { hashText, normalizeText } from './utils.js';
 
 class VectorCache {
-    constructor(similarityThreshold = 0.85, maxCapacity = 3) {
-        this.policy = new LFUPolicy(maxCapacity);
+    constructor({
+        similarityThreshold = 0.86,
+        maxCapacity = 2048,
+        maxBytes = 128 * 1024 * 1024,
+        qdrantUrl = process.env.QDRANT_URL || null,
+        qdrantApiKey = process.env.QDRANT_API_KEY || null,
+        collection = process.env.QDRANT_COLLECTION || 'ai_cdn_semantic_cache',
+        dimensions = Number(process.env.EMBEDDING_DIMENSIONS || 384)
+    } = {}) {
+        this.policy = new LFUPolicy({ maxEntries: maxCapacity, maxBytes });
         this.threshold = similarityThreshold;
+        this.qdrantUrl = qdrantUrl ? qdrantUrl.replace(/\/$/, '') : null;
+        this.qdrantApiKey = qdrantApiKey;
+        this.collection = collection;
+        this.dimensions = dimensions;
+        this.qdrantReady = false;
     }
 
-    _cosineSimilarity(vecA, vecB) {
-        let dotProduct = 0.0;
-        for (let i = 0; i < vecA.length; i++) {
-            dotProduct += vecA[i] * vecB[i];
-        }
-        return dotProduct;
-    }
+    async init() {
+        if (!this.qdrantUrl) return false;
 
-    insert(userPrompt, embedding, response, systemPrompt) {
-        const cachePayload = { embedding, response, systemPrompt };
-        // Pass management mechanics to the LFU tracking policy layer
-        this.policy.set(userPrompt, cachePayload);
-    }
-
-    search(queryEmbedding, systemPrompt) {
-        let bestMatchKey = null;
-        let bestMatchPayload = null;
-        let highestScore = -1;
-
-        // Iterate over the policy store to look for geometric alignment
-        for (const [userPrompt, item] of this.policy.store.entries()) {
-            if (item.systemPrompt !== systemPrompt) continue;
-
-            const score = this._cosineSimilarity(queryEmbedding, item.embedding);
-            if (score > highestScore) {
-                highestScore = score;
-                bestMatchKey = userPrompt;
-                bestMatchPayload = item;
+        try {
+            const existing = await this._request(`/collections/${this.collection}`, { method: 'GET' });
+            if (existing?.status === 'green' || existing?.result) {
+                this.qdrantReady = true;
+                return true;
+            }
+        } catch (error) {
+            if (!String(error.message).includes('404')) {
+                console.warn(`[VectorCache] Qdrant collection check failed: ${error.message}`);
+                return false;
             }
         }
 
-        if (highestScore >= this.threshold && bestMatchKey) {
-            // Re-trigger a get call on the policy layer to bump its LFU counter
-            this.policy.get(bestMatchKey);
-            return { response: bestMatchPayload.response, score: highestScore };
+        try {
+            await this._request(`/collections/${this.collection}`, {
+                method: 'PUT',
+                body: {
+                    vectors: {
+                        size: this.dimensions,
+                        distance: 'Cosine'
+                    }
+                }
+            });
+            this.qdrantReady = true;
+            return true;
+        } catch (error) {
+            console.warn(`[VectorCache] Qdrant init failed. Using in-memory vector cache: ${error.message}`);
+            this.qdrantReady = false;
+            return false;
+        }
+    }
+
+    async _request(path, { method = 'GET', body = undefined } = {}) {
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.qdrantApiKey) headers['api-key'] = this.qdrantApiKey;
+
+        const response = await fetch(`${this.qdrantUrl}${path}`, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body)
+        });
+
+        const text = await response.text();
+        const parsed = text ? JSON.parse(text) : null;
+
+        if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}: ${text}`);
+        }
+
+        return parsed;
+    }
+
+    _localKey(scopeHash, prompt) {
+        return hashText(`${scopeHash}\n${normalizeText(prompt)}`);
+    }
+
+    _payload(scopeHash, prompt, response, metadata = {}) {
+        return {
+            scopeHash,
+            prompt: normalizeText(prompt),
+            response,
+            metadata,
+            promptHash: hashText(prompt).slice(0, 16),
+            createdAt: Date.now()
+        };
+    }
+
+    async insert({ scopeHash, prompt, embedding, response, metadata = {} }) {
+        const payload = this._payload(scopeHash, prompt, response, metadata);
+        const localKey = this._localKey(scopeHash, prompt);
+        this.policy.set(localKey, { ...payload, embedding });
+
+        if (!this.qdrantReady) return { backend: 'memory', id: localKey };
+
+        const pointId = crypto.randomUUID();
+        try {
+            await this._request(`/collections/${this.collection}/points?wait=true`, {
+                method: 'PUT',
+                body: {
+                    points: [{
+                        id: pointId,
+                        vector: embedding,
+                        payload
+                    }]
+                }
+            });
+            return { backend: 'qdrant', id: pointId };
+        } catch (error) {
+            console.warn(`[VectorCache] Qdrant insert failed. In-memory copy still exists: ${error.message}`);
+            return { backend: 'memory', id: localKey };
+        }
+    }
+
+    async search({ scopeHash, embedding, limit = 1 }) {
+        if (this.qdrantReady) {
+            try {
+                const result = await this._request(`/collections/${this.collection}/points/search`, {
+                    method: 'POST',
+                    body: {
+                        vector: embedding,
+                        limit,
+                        score_threshold: this.threshold,
+                        with_payload: true,
+                        filter: {
+                            must: [{ key: 'scopeHash', match: { value: scopeHash } }]
+                        }
+                    }
+                });
+
+                const match = result?.result?.[0];
+                if (match?.score >= this.threshold) {
+                    return {
+                        backend: 'qdrant',
+                        score: match.score,
+                        response: match.payload.response,
+                        prompt: match.payload.prompt,
+                        metadata: match.payload.metadata || {}
+                    };
+                }
+            } catch (error) {
+                console.warn(`[VectorCache] Qdrant search failed. Falling back to memory: ${error.message}`);
+            }
+        }
+
+        let bestKey = null;
+        let bestPayload = null;
+        let bestScore = -1;
+
+        for (const [key, item] of this.policy.entries()) {
+            if (item.scopeHash !== scopeHash) continue;
+            const score = cosineSimilarity(embedding, item.embedding);
+            if (score > bestScore) {
+                bestScore = score;
+                bestKey = key;
+                bestPayload = item;
+            }
+        }
+
+        if (bestPayload && bestScore >= this.threshold) {
+            this.policy.get(bestKey);
+            return {
+                backend: 'memory',
+                score: bestScore,
+                response: bestPayload.response,
+                prompt: bestPayload.prompt,
+                metadata: bestPayload.metadata || {}
+            };
         }
 
         return null;
+    }
+
+    stats() {
+        return {
+            backend: this.qdrantReady ? 'qdrant+memory' : 'memory',
+            threshold: this.threshold,
+            collection: this.collection,
+            ...this.policy.stats()
+        };
     }
 }
 

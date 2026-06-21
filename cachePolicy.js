@@ -1,53 +1,180 @@
 class LFUPolicy {
-    constructor(maxCapacity = 3) {
-        this.maxCapacity = maxCapacity;
-        this.store = new Map(); // Key -> Data Payload
-        this.frequencies = new Map(); // Key -> Access Count
+    constructor({ maxEntries = 1024, maxBytes = 64 * 1024 * 1024, defaultTtlMs = null } = {}) {
+        this.maxEntries = maxEntries;
+        this.maxBytes = maxBytes;
+        this.defaultTtlMs = defaultTtlMs;
+        this.records = new Map();
+        this.currentBytes = 0;
+        this.evictions = 0;
+    }
+
+    _now() {
+        return Date.now();
+    }
+
+    _estimateBytes(value) {
+        try {
+            return Buffer.byteLength(JSON.stringify(value), 'utf8');
+        } catch {
+            return Buffer.byteLength(String(value), 'utf8');
+        }
+    }
+
+    _isExpired(record) {
+        return record.expiresAt !== null && record.expiresAt <= this._now();
+    }
+
+    _touch(record) {
+        record.frequency += 1;
+        record.lastAccessedAt = this._now();
+    }
+
+    _remove(key) {
+        const record = this.records.get(key);
+        if (!record) return false;
+        this.currentBytes -= record.bytes;
+        this.records.delete(key);
+        return true;
+    }
+
+    _evictOne() {
+        let candidateKey = null;
+        let candidate = null;
+
+        for (const [key, record] of this.records.entries()) {
+            if (!candidate) {
+                candidateKey = key;
+                candidate = record;
+                continue;
+            }
+
+            const lowerFrequency = record.frequency < candidate.frequency;
+            const sameFrequencyOlder = record.frequency === candidate.frequency
+                && record.lastAccessedAt < candidate.lastAccessedAt;
+
+            if (lowerFrequency || sameFrequencyOlder) {
+                candidateKey = key;
+                candidate = record;
+            }
+        }
+
+        if (candidateKey !== null) {
+            this._remove(candidateKey);
+            this.evictions += 1;
+            return candidateKey;
+        }
+
+        return null;
+    }
+
+    pruneExpired() {
+        for (const [key, record] of this.records.entries()) {
+            if (this._isExpired(record)) this._remove(key);
+        }
     }
 
     get(key) {
-        if (!this.store.has(key)) return null;
+        const record = this.records.get(key);
+        if (!record) return null;
 
-        // Increment access frequency (LFU Logic)
-        const currentFreq = this.frequencies.get(key) || 0;
-        this.frequencies.set(key, currentFreq + 1);
+        if (this._isExpired(record)) {
+            this._remove(key);
+            return null;
+        }
 
-        return this.store.get(key);
+        this._touch(record);
+        return record.value;
     }
 
-    set(key, value) {
-        if (this.maxCapacity <= 0) return;
+    peek(key) {
+        const record = this.records.get(key);
+        if (!record) return null;
 
-        // If key already exists, update data and bump frequency
-        if (this.store.has(key)) {
-            this.store.set(key, value);
-            this.frequencies.set(key, (this.frequencies.get(key) || 0) + 1);
-            return;
+        if (this._isExpired(record)) {
+            this._remove(key);
+            return null;
         }
 
-        // Eviction Boundary Constraint logic
-        if (this.store.size >= this.maxCapacity) {
-            let minFreq = Infinity;
-            let keyToEvict = null;
+        return record.value;
+    }
 
-            // Scan frequencies to isolate the Least Frequently Used item
-            for (const [k, freq] of this.frequencies.entries()) {
-                if (freq < minFreq) {
-                    minFreq = freq;
-                    keyToEvict = k;
-                }
-            }
+    set(key, value, { ttlMs = this.defaultTtlMs } = {}) {
+        if (this.maxEntries <= 0 || this.maxBytes <= 0) return false;
 
-            if (keyToEvict) {
-                console.log(`[Cache Policy] Capacity Blown. Evicting LFU key: "${keyToEvict}" (Frequency: ${minFreq})`);
-                this.store.delete(keyToEvict);
-                this.frequencies.delete(keyToEvict);
-            }
+        const now = this._now();
+        const bytes = this._estimateBytes(value);
+        const expiresAt = ttlMs ? now + ttlMs : null;
+
+        if (bytes > this.maxBytes) {
+            return false;
         }
 
-        // Insert fresh entry
-        this.store.set(key, value);
-        this.frequencies.set(key, 1); // Baseline frequency
+        const existing = this.records.get(key);
+        if (existing) {
+            this.currentBytes -= existing.bytes;
+            this.records.set(key, {
+                value,
+                bytes,
+                frequency: existing.frequency + 1,
+                createdAt: existing.createdAt,
+                lastAccessedAt: now,
+                expiresAt
+            });
+            this.currentBytes += bytes;
+        } else {
+            this.records.set(key, {
+                value,
+                bytes,
+                frequency: 1,
+                createdAt: now,
+                lastAccessedAt: now,
+                expiresAt
+            });
+            this.currentBytes += bytes;
+        }
+
+        this.pruneExpired();
+        while (this.records.size > this.maxEntries || this.currentBytes > this.maxBytes) {
+            this._evictOne();
+        }
+
+        return true;
+    }
+
+    delete(key) {
+        return this._remove(key);
+    }
+
+    has(key) {
+        return this.peek(key) !== null;
+    }
+
+    entries() {
+        this.pruneExpired();
+        return Array.from(this.records.entries()).map(([key, record]) => [key, record.value]);
+    }
+
+    metadata(key) {
+        const record = this.records.get(key);
+        if (!record || this._isExpired(record)) return null;
+        return {
+            frequency: record.frequency,
+            bytes: record.bytes,
+            createdAt: record.createdAt,
+            lastAccessedAt: record.lastAccessedAt,
+            expiresAt: record.expiresAt
+        };
+    }
+
+    stats() {
+        this.pruneExpired();
+        return {
+            entries: this.records.size,
+            maxEntries: this.maxEntries,
+            bytes: this.currentBytes,
+            maxBytes: this.maxBytes,
+            evictions: this.evictions
+        };
     }
 }
 
