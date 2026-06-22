@@ -14,7 +14,7 @@ class AICdnNode {
         region,
         dataDir = './data',
         classifier = new QueryClassifier(),
-        exactCache = new LFUPolicy({ maxEntries: 2048, maxBytes: 64 * 1024 * 1024 }),
+        
         prefixCache = new PrefixTrie({ maxEntries: 512, maxBytes: 128 * 1024 * 1024 }),
         semanticCache = new VectorCache(),
         clusterEngine = new ClusterEngine(),
@@ -23,7 +23,7 @@ class AICdnNode {
         this.nodeId = nodeId;
         this.region = region;
         this.classifier = classifier;
-        this.exactCache = exactCache;
+        
         this.prefixCache = prefixCache;
         this.semanticCache = semanticCache;
         this.clusterEngine = clusterEngine;
@@ -50,13 +50,7 @@ class AICdnNode {
         return `[${route}] ${source}: ${prompt}${prefixNote}`;
     }
 
-    _cacheExact(payload, response, metadata = {}) {
-        this.exactCache.set(this._exactKey(payload), {
-            response,
-            metadata,
-            createdAt: Date.now()
-        });
-    }
+    
 
     async _cacheSemantic(payload, response, embedding, metadata = {}) {
         await this.semanticCache.insert({
@@ -101,15 +95,7 @@ class AICdnNode {
     async lookupOnly(payloadOrBody, route, embedding = null) {
         const payload = payloadOrBody.scopeHash ? payloadOrBody : extractChatPayload(payloadOrBody);
 
-        const exact = this.exactCache.get(this._exactKey(payload));
-        if (exact) {
-            return {
-                source: 'Neighbor Exact Cache',
-                route,
-                response: exact.response,
-                metadata: exact.metadata || {}
-            };
-        }
+        
 
         if (route === 'SEMANTIC_PATH') {
             const queryEmbedding = embedding || await this.embeddingProvider.embed(payload.userPrompt);
@@ -155,19 +141,7 @@ class AICdnNode {
             return { statusCode: 400, body: { error: 'Missing user prompt string.' } };
         }
 
-        const exact = this.exactCache.get(this._exactKey(payload));
-        if (exact) {
-            return {
-                body: {
-                    nodeId: this.nodeId,
-                    region: this.region,
-                    route: exact.metadata?.route || 'EXACT_PATH',
-                    source: 'Local Exact Response Cache',
-                    response: exact.response,
-                    latencyMs: Date.now() - startTime
-                }
-            };
-        }
+        
 
         const classification = this.classifier.classify(payload);
         const route = classification.route;
@@ -304,7 +278,7 @@ class AICdnNode {
         return {
             nodeId: this.nodeId,
             region: this.region,
-            exactCache: this.exactCache.stats(),
+            
             prefixCache: this.prefixCache.stats(),
             semanticCache: this.semanticCache.stats(),
             neighbors: this.neighbors.map((node) => ({ nodeId: node.nodeId, region: node.region }))
