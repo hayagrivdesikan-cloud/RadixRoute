@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import AICdnNode from './aiCdnNode.js';
-
+import 'dotenv/config';
 const fastify = Fastify({ logger: true });
 
 const primaryNode = new AICdnNode({
@@ -54,6 +54,7 @@ fastify.post('/_neighbor/:nodeId/lookup', async (request, reply) => {
 const start = async () => {
     try {
         const port = Number(process.env.PORT || 3000);
+
         await fastify.listen({ port, host: '0.0.0.0' });
         console.log(`AI-CDN edge gateway active on port ${port}`);
     } catch (error) {

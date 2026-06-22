@@ -23,7 +23,9 @@ class VectorCache {
     }
 
     async init() {
-        if (!this.qdrantUrl) return false;
+        if (!this.qdrantUrl) {
+        throw new Error('[VectorCache] Missing QDRANT_URL');
+    }
 
         try {
             const existing = await this._request(`/collections/${this.collection}`, { method: 'GET' });
@@ -34,7 +36,7 @@ class VectorCache {
         } catch (error) {
             if (!String(error.message).includes('404')) {
                 console.warn(`[VectorCache] Qdrant collection check failed: ${error.message}`);
-                return false;
+                throw new Error(`[VectorCache] Qdrant collection check failed: ${error.message}`);
             }
         }
 
@@ -51,10 +53,10 @@ class VectorCache {
             this.qdrantReady = true;
             return true;
         } catch (error) {
-            console.warn(`[VectorCache] Qdrant init failed. Using in-memory vector cache: ${error.message}`);
-            this.qdrantReady = false;
-            return false;
-        }
+            throw new Error(
+        `[VectorCache] Qdrant init failed: ${error.message}`
+    );
+}
     }
 
     async _request(path, { method = 'GET', body = undefined } = {}) {
@@ -95,9 +97,12 @@ class VectorCache {
     async insert({ scopeHash, prompt, embedding, response, metadata = {} }) {
         const payload = this._payload(scopeHash, prompt, response, metadata);
         const localKey = this._localKey(scopeHash, prompt);
+        if (!this.qdrantReady) {
+    throw new Error('Qdrant is not initialized');
+}
         this.policy.set(localKey, { ...payload, embedding });
 
-        if (!this.qdrantReady) return { backend: 'memory', id: localKey };
+        
 
         const pointId = crypto.randomUUID();
         try {
@@ -113,8 +118,9 @@ class VectorCache {
             });
             return { backend: 'qdrant', id: pointId };
         } catch (error) {
-            console.warn(`[VectorCache] Qdrant insert failed. In-memory copy still exists: ${error.message}`);
-            return { backend: 'memory', id: localKey };
+            throw new Error(
+        `[VectorCache] Qdrant insert failed: ${error.message}`
+    );
         }
     }
 
@@ -145,41 +151,24 @@ class VectorCache {
                     };
                 }
             } catch (error) {
-                console.warn(`[VectorCache] Qdrant search failed. Falling back to memory: ${error.message}`);
-            }
+    throw new Error(
+        `[VectorCache] Qdrant search failed: ${error.message}`
+    );
+}
         }
 
-        let bestKey = null;
-        let bestPayload = null;
-        let bestScore = -1;
+        
 
-        for (const [key, item] of this.policy.entries()) {
-            if (item.scopeHash !== scopeHash) continue;
-            const score = cosineSimilarity(embedding, item.embedding);
-            if (score > bestScore) {
-                bestScore = score;
-                bestKey = key;
-                bestPayload = item;
-            }
-        }
+        
 
-        if (bestPayload && bestScore >= this.threshold) {
-            this.policy.get(bestKey);
-            return {
-                backend: 'memory',
-                score: bestScore,
-                response: bestPayload.response,
-                prompt: bestPayload.prompt,
-                metadata: bestPayload.metadata || {}
-            };
-        }
+        
 
         return null;
     }
 
     stats() {
         return {
-            backend: this.qdrantReady ? 'qdrant+memory' : 'memory',
+            backend: this.qdrantReady ? 'qdrant+memory' : 'offline',
             threshold: this.threshold,
             collection: this.collection,
             ...this.policy.stats()

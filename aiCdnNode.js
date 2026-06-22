@@ -40,9 +40,7 @@ class AICdnNode {
         if (node && node !== this && !this.neighbors.includes(node)) this.neighbors.push(node);
     }
 
-    _exactKey(payload) {
-        return hashText(`${payload.scopeHash}\n${normalizeText(payload.fullPromptText || payload.userPrompt)}`);
-    }
+   
 
     _mockInference(payload, { route, source, prefixHit = null } = {}) {
         const prompt = payload.userPrompt || 'request';
@@ -154,7 +152,7 @@ class AICdnNode {
             });
 
             if (semanticHit) {
-                this._cacheExact(payload, semanticHit.response, { route, source: 'semantic' });
+                
                 return {
                     body: {
                         nodeId: this.nodeId,
@@ -179,7 +177,7 @@ class AICdnNode {
             if (decision.action === 'NEIGHBOR_LOOKUP') {
                 const neighborHit = await this._lookupNeighbors(payload, route, embedding);
                 if (neighborHit) {
-                    this._cacheExact(payload, neighborHit.response, { route, source: 'neighbor' });
+                    
                     await this._cacheSemantic(payload, neighborHit.response, embedding, { source: 'neighbor_backfill' });
                     return {
                         body: {
@@ -201,7 +199,7 @@ class AICdnNode {
 
             const source = decision.action === 'GLOBAL_INFERENCE' ? 'Global Inference' : 'Local Inference';
             const response = this._mockInference(payload, { route, source });
-            this._cacheExact(payload, response, { route, source });
+           
             await this._cacheSemantic(payload, response, embedding, { source });
             this.diskStore.append({ type: 'semantic_response', scopeHash: payload.scopeHash, prompt: payload.userPrompt, response });
 
@@ -244,7 +242,7 @@ class AICdnNode {
             ? this._mockInference(payload, { route, source: 'Inference after neighbor prefix reuse', prefixHit: activePrefixHit })
             : this._mockInference(payload, { route, source, prefixHit: activePrefixHit });
 
-        this._cacheExact(payload, response, { route, source });
+        
         this._cachePrefix(payload, response, { source });
         this.diskStore.append({
             type: 'prefix_response',
