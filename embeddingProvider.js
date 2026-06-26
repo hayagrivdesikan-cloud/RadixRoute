@@ -1,3 +1,4 @@
+import { GoogleGenAI } from '@google/genai';
 import { normalizeText } from './utils.js';
 
 export function normalizeVector(vector) {
@@ -23,61 +24,73 @@ function fnv1a32(value) {
 }
 
 class EmbeddingProvider {
-    constructor({ dimensions = 384, endpoint = process.env.EMBEDDING_ENDPOINT || null } = {}) {
+    constructor({ dimensions = Number(process.env.EMBEDDING_DIMENSIONS || 384) } = {}) {
         this.dimensions = dimensions;
-        this.endpoint = endpoint;
+        
+        // Initialize the official Gemini client if the key exists
+        if (process.env.GEMINI_API_KEY) {
+            this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        } else {
+            console.warn('[EmbeddingProvider] GEMINI_API_KEY missing in environmental variables. Defaulting to local hashing.');
+        }
     }
 
+    /**
+     * Fallback mechanism only used if Gemini is unconfigured or encounters an outage
+     */
     _localHashEmbedding(text) {
         const vector = new Array(this.dimensions).fill(0);
         const normalized = normalizeText(text).toLowerCase();
         const tokens = normalized.match(/[a-z0-9_+#.-]+/g) || [];
 
-        for (const token of tokens) {
-            const features = [token];
-            for (let i = 0; i < token.length - 2; i += 1) {
-                features.push(token.slice(i, i + 3));
-            }
-
-            for (const feature of features) {
-                const hash = fnv1a32(feature);
-                const index = hash % this.dimensions;
-                const sign = (hash & 1) === 0 ? 1 : -1;
-                vector[index] += sign;
-            }
+        for (const feature of tokens) {
+            const hash = fnv1a32(feature);
+            const index = hash % this.dimensions;
+            const sign = (hash & 1) === 0 ? 1 : -1;
+            vector[index] += sign;
         }
 
         return normalizeVector(vector);
     }
 
-    async _remoteEmbedding(text) {
-        if (!this.endpoint) return null;
+    /**
+     * Live production method querying Gemini with compressed dimensions matching Qdrant
+     */
+    async _geminiEmbedding(text) {
+        if (!this.ai) return null;
 
-        const response = await fetch(this.endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ input: text, dimensions: this.dimensions })
+        // gemini-embedding-001 natively supports Matryoshka truncation down to specified dimensions
+        const response = await this.ai.models.embedContent({
+            model: 'gemini-embedding-001',
+            contents: text,
+            config: {
+                outputDimensionality: this.dimensions
+            }
         });
 
-        if (!response.ok) {
-            throw new Error(`Embedding endpoint failed: ${response.status} ${response.statusText}`);
+        // Robust parsing to catch structural layout differences in single/batch responses
+        let embeddingValues = null;
+        if (response.embedding?.values) {
+            embeddingValues = response.embedding.values;
+        } else if (Array.isArray(response.embeddings)) {
+            embeddingValues = response.embeddings[0]?.values;
+        } else if (response.embeddings?.values) {
+            embeddingValues = response.embeddings.values;
         }
 
-        const payload = await response.json();
-        const embedding = payload.embedding || payload.data?.[0]?.embedding;
-        if (!Array.isArray(embedding)) {
-            throw new Error('Embedding endpoint response did not contain an embedding array.');
+        if (!Array.isArray(embeddingValues)) {
+            throw new Error('Gemini API response structure did not return valid embedding values.');
         }
 
-        return normalizeVector(embedding);
+        return normalizeVector(embeddingValues);
     }
 
     async embed(text) {
-        if (this.endpoint) {
+        if (this.ai) {
             try {
-                return await this._remoteEmbedding(text);
+                return await this._geminiEmbedding(text);
             } catch (error) {
-                console.warn(`[EmbeddingProvider] Remote embedding failed. Falling back to local hash embedding: ${error.message}`);
+                console.warn(`[EmbeddingProvider] Gemini API failed. Falling back to local hash: ${error.message}`);
             }
         }
 

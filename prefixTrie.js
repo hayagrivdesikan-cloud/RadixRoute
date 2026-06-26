@@ -10,9 +10,14 @@ class TrieNode {
 
 class PrefixTrie {
     constructor({ maxEntries = 512, maxBytes = 128 * 1024 * 1024, minPrefixChars = 96 } = {}) {
+        this.maxEntries = maxEntries;
+        this.maxBytes = maxBytes;
         this.root = new TrieNode();
         this.policy = new LFUPolicy({ maxEntries, maxBytes });
         this.minPrefixChars = minPrefixChars;
+        this.insertions = 0;
+        this.lookups = 0;
+        this.hits = 0;
     }
 
     _scopedText(scope, text) {
@@ -33,7 +38,7 @@ class PrefixTrie {
         }
 
         current.cacheKey = cacheKey;
-        this.policy.set(cacheKey, {
+        const stored = this.policy.set(cacheKey, {
             ...payload,
             scope,
             prefixText: normalizedPrefix,
@@ -43,10 +48,13 @@ class PrefixTrie {
             createdAt: Date.now()
         });
 
-        return cacheKey;
+        if (stored) this.insertions += 1;
+        return stored ? cacheKey : null;
     }
 
     longestPrefixMatch(scope, promptText, { minPrefixChars = this.minPrefixChars } = {}) {
+        this.lookups += 1;
+
         const normalizedPrompt = normalizeText(promptText);
         if (!normalizedPrompt || normalizedPrompt.length < minPrefixChars) return null;
 
@@ -76,17 +84,37 @@ class PrefixTrie {
         const payload = this.policy.get(bestKey);
         if (!payload) return null;
 
+        const matchedText = normalizedPrompt.slice(0, matchedChars);
+        const matchedTokens = estimateTokens(matchedText);
+        const tokensSaved = Math.min(payload.prefixTokens, matchedTokens);
+
+        this.hits += 1;
         return {
             cacheKey: bestKey,
             matchedChars,
-            matchedTokens: estimateTokens(normalizedPrompt.slice(0, matchedChars)),
-            tokensSaved: Math.min(payload.prefixTokens, estimateTokens(normalizedPrompt.slice(0, matchedChars))),
+            matchedTokens,
+            tokensSaved,
             payload
         };
     }
 
+    clear() {
+        this.root = new TrieNode();
+        this.policy.clear();
+        this.insertions = 0;
+        this.lookups = 0;
+        this.hits = 0;
+    }
+
     stats() {
-        return this.policy.stats();
+        return {
+            ...this.policy.stats(),
+            minPrefixChars: this.minPrefixChars,
+            insertions: this.insertions,
+            lookups: this.lookups,
+            hits: this.hits,
+            hitRate: this.lookups ? this.hits / this.lookups : 0
+        };
     }
 }
 

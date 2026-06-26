@@ -1,11 +1,10 @@
 import crypto from 'crypto';
 import LFUPolicy from './cachePolicy.js';
-import { cosineSimilarity } from './embeddingProvider.js';
 import { hashText, normalizeText } from './utils.js';
 
 class VectorCache {
     constructor({
-        similarityThreshold = 0.86,
+        similarityThreshold = 0.91,
         maxCapacity = 2048,
         maxBytes = 128 * 1024 * 1024,
         qdrantUrl = process.env.QDRANT_URL || null,
@@ -20,12 +19,15 @@ class VectorCache {
         this.collection = collection;
         this.dimensions = dimensions;
         this.qdrantReady = false;
+        this.insertions = 0;
+        this.searches = 0;
+        this.hits = 0;
     }
 
     async init() {
         if (!this.qdrantUrl) {
-        throw new Error('[VectorCache] Missing QDRANT_URL');
-    }
+            throw new Error('[VectorCache] Missing QDRANT_URL');
+        }
 
         try {
             const existing = await this._request(`/collections/${this.collection}`, { method: 'GET' });
@@ -35,7 +37,6 @@ class VectorCache {
             }
         } catch (error) {
             if (!String(error.message).includes('404')) {
-                console.warn(`[VectorCache] Qdrant collection check failed: ${error.message}`);
                 throw new Error(`[VectorCache] Qdrant collection check failed: ${error.message}`);
             }
         }
@@ -53,10 +54,8 @@ class VectorCache {
             this.qdrantReady = true;
             return true;
         } catch (error) {
-            throw new Error(
-        `[VectorCache] Qdrant init failed: ${error.message}`
-    );
-}
+            throw new Error(`[VectorCache] Qdrant init failed: ${error.message}`);
+        }
     }
 
     async _request(path, { method = 'GET', body = undefined } = {}) {
@@ -70,7 +69,12 @@ class VectorCache {
         });
 
         const text = await response.text();
-        const parsed = text ? JSON.parse(text) : null;
+        let parsed = null;
+        try {
+            parsed = text ? JSON.parse(text) : null;
+        } catch {
+            parsed = { raw: text };
+        }
 
         if (!response.ok) {
             throw new Error(`${response.status} ${response.statusText}: ${text}`);
@@ -95,14 +99,13 @@ class VectorCache {
     }
 
     async insert({ scopeHash, prompt, embedding, response, metadata = {} }) {
+        if (!this.qdrantReady) {
+            throw new Error('Qdrant is not initialized');
+        }
+
         const payload = this._payload(scopeHash, prompt, response, metadata);
         const localKey = this._localKey(scopeHash, prompt);
-        if (!this.qdrantReady) {
-    throw new Error('Qdrant is not initialized');
-}
         this.policy.set(localKey, { ...payload, embedding });
-
-        
 
         const pointId = crypto.randomUUID();
         try {
@@ -116,61 +119,102 @@ class VectorCache {
                     }]
                 }
             });
+            this.insertions += 1;
             return { backend: 'qdrant', id: pointId };
         } catch (error) {
-            throw new Error(
-        `[VectorCache] Qdrant insert failed: ${error.message}`
-    );
+            throw new Error(`[VectorCache] Qdrant insert failed: ${error.message}`);
         }
     }
 
     async search({ scopeHash, embedding, limit = 1 }) {
-        if (this.qdrantReady) {
-            try {
-                const result = await this._request(`/collections/${this.collection}/points/search`, {
-                    method: 'POST',
-                    body: {
-                        vector: embedding,
-                        limit,
-                        score_threshold: this.threshold,
-                        with_payload: true,
-                        filter: {
-                            must: [{ key: 'scopeHash', match: { value: scopeHash } }]
-                        }
-                    }
-                });
+        this.searches += 1;
 
-                const match = result?.result?.[0];
-                if (match?.score >= this.threshold) {
-                    return {
-                        backend: 'qdrant',
-                        score: match.score,
-                        response: match.payload.response,
-                        prompt: match.payload.prompt,
-                        metadata: match.payload.metadata || {}
-                    };
-                }
-            } catch (error) {
-    throw new Error(
-        `[VectorCache] Qdrant search failed: ${error.message}`
-    );
-}
+        if (!this.qdrantReady) {
+            throw new Error('Qdrant is not initialized');
         }
 
-        
+        try {
+            const result = await this._request(`/collections/${this.collection}/points/search`, {
+                method: 'POST',
+                body: {
+                    vector: embedding,
+                    limit,
+                    score_threshold: this.threshold,
+                    with_payload: true,
+                    filter: {
+                        must: [{ key: 'scopeHash', match: { value: scopeHash } }]
+                    }
+                }
+            });
 
-        
-
-        
+            const match = result?.result?.[0];
+            if (match?.score >= this.threshold) {
+                this.hits += 1;
+                return {
+                    backend: 'qdrant',
+                    score: match.score,
+                    response: match.payload.response,
+                    prompt: match.payload.prompt,
+                    promptHash: match.payload.promptHash,
+                    metadata: match.payload.metadata || {}
+                };
+            }
+        } catch (error) {
+            throw new Error(`[VectorCache] Qdrant search failed: ${error.message}`);
+        }
 
         return null;
     }
 
+    async count() {
+        if (!this.qdrantReady) return this.policy.stats().entries;
+
+        try {
+            const result = await this._request(`/collections/${this.collection}/points/count`, {
+                method: 'POST',
+                body: { exact: true }
+            });
+            return result?.result?.count ?? 0;
+        } catch (error) {
+            throw new Error(`[VectorCache] Qdrant count failed: ${error.message}`);
+        }
+    }
+
+    async clear() {
+        this.policy.clear();
+        this.insertions = 0;
+        this.searches = 0;
+        this.hits = 0;
+
+        if (!this.qdrantUrl) {
+            this.qdrantReady = false;
+            return { cleared: true, backend: 'memory' };
+        }
+
+        try {
+            await this._request(`/collections/${this.collection}`, { method: 'DELETE' });
+        } catch (error) {
+            if (!String(error.message).includes('404')) {
+                throw new Error(`[VectorCache] Qdrant clear failed: ${error.message}`);
+            }
+        }
+
+        this.qdrantReady = false;
+        await this.init();
+        return { cleared: true, backend: 'qdrant', collection: this.collection };
+    }
+
     stats() {
+        const searches = this.searches;
         return {
             backend: this.qdrantReady ? 'qdrant+memory' : 'offline',
             threshold: this.threshold,
             collection: this.collection,
+            dimensions: this.dimensions,
+            insertions: this.insertions,
+            searches,
+            hits: this.hits,
+            hitRate: searches ? this.hits / searches : 0,
             ...this.policy.stats()
         };
     }

@@ -166,6 +166,12 @@ class LFUPolicy {
         };
     }
 
+    clear() {
+        this.records.clear();
+        this.currentBytes = 0;
+        this.evictions = 0;
+    }
+
     stats() {
         this.pruneExpired();
         return {
