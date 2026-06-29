@@ -1,17 +1,21 @@
 {
-  "name": "ai-cdn-upgraded",
-  "version": "0.2.0",
-  "type": "module",
-  "private": true,
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check aiCdnNode.js && node --check cachePolicy.js && node --check classifier.js && node --check clusterEngine.js && node --check embeddingProvider.js && node --check prefixTrie.js && node --check vectorCache.js"
-  },
-  "dependencies": {
-    "fastify": "^5.2.1"
-  },
-  "engines": {
-    "node": ">=20"
-  }
+"name": "radixroute",
+"version": "0.2.0",
+"description": "AI-CDN prototype for route-aware LLM inference caching using semantic cache, prefix cache, neighbor lookup, and token-savings telemetry.",
+"type": "module",
+"private": true,
+"scripts": {
+"start": "node server.js",
+"dev": "node --watch server.js",
+"check": "node --check server.js && node --check aiCdnNode.js && node --check cachePolicy.js && node --check classifier.js && node --check clusterEngine.js && node --check embeddingProvider.js && node --check prefixTrie.js && node --check vectorCache.js && node --check diskStore.js && node --check utils.js && node --check benchmark.js",
+"benchmark": "node benchmark.js"
+},
+"dependencies": {
+"@google/genai": "^2.9.0",
+"dotenv": "^17.4.2",
+"fastify": "^5.8.5"
+},
+"engines": {
+"node": ">=20"
+}
 }
